@@ -9,16 +9,32 @@ st.markdown('<p style="text-align: center; font-size: 20px;">AI-Powered Product 
 
 @st.cache_data
 def load_data():
-    """Load all data with compressed formats for faster performance"""
+    """Load all data with proper error handling"""
     try:
         # Load ML models (kept as pickle for compatibility)
         customer_model = joblib.load('customer_model.pkl')
         scaler = joblib.load('scaler.pkl')
         
         # Load compressed data files for much faster loading
-        customers = pd.read_csv('customers_with_groups.csv', index_col=0)  # Keep as CSV if small
-        similarities = np.load('product_similarities.npz')['data']  # Compressed NPY
-        customer_products = pd.read_parquet('customer_products.parquet')  # Compressed CSV
+        customers = pd.read_csv('customers_with_groups.csv', index_col=0)
+        
+        # Load similarities with proper error handling - THIS IS THE FIX
+        try:
+            # Try NPZ compressed file first
+            similarities_file = np.load('product_similarities.npz')
+            similarities = similarities_file['arr_0']  # Default numpy compressed array name
+            similarities_file.close()  # Close the file properly
+        except (FileNotFoundError, KeyError):
+            try:
+                # Fallback to NPY file with allow_pickle for object arrays
+                similarities = np.load('product_similarities.npy', allow_pickle=True)
+                st.info("⚠️ Using original NPY file - consider compressing for faster loading")
+            except FileNotFoundError:
+                st.error("❌ Could not find product_similarities file (.npz or .npy)")
+                st.error("Make sure the file exists in your repository")
+                st.stop()
+        
+        customer_products = pd.read_parquet('customer_products.parquet')
         
         # Try to load product names from parquet, fallback to CSV
         try:
@@ -28,9 +44,22 @@ def load_data():
         
         return customer_model, scaler, customers, similarities, customer_products, product_names
     
+    except FileNotFoundError as e:
+        st.error(f"❌ File not found: {e}")
+        st.error("Make sure all required files are in your repository:")
+        st.code("""
+        Required files:
+        - customer_model.pkl
+        - scaler.pkl
+        - customers_with_groups.csv
+        - product_similarities.npz (or .npy)
+        - customer_products.parquet
+        - product_names.parquet (or .csv)
+        """)
+        st.stop()
     except Exception as e:
-        st.error(f"Error loading data: {e}")
-        st.info("Make sure all compressed files are in the same directory as your app.")
+        st.error(f"❌ Error loading data: {e}")
+        st.info("Debug info: Check that all files are properly formatted and accessible")
         st.stop()
 
 # Load data with progress indicator
@@ -54,38 +83,41 @@ with tab1:
     
     if st.button("🔮 Get Recommendations", type="primary"):
         with st.spinner('🤖 AI is analyzing product similarities...'):
-            idx = products.index(selected)
-            scores = similarities[idx]
-            top5 = scores.argsort()[::-1][1:6]
-            
-            st.markdown("#### 🏆 Top 5 Similar Products:")
-            
-            # Create columns for better layout
-            cols = st.columns(2)
-            
-            for i, product_idx in enumerate(top5):
-                product_code = products[product_idx]
-                name = product_names.loc[product_code].values[0] if product_code in product_names.index else "Product Name Not Available"
-                score = scores[product_idx]
+            try:
+                idx = products.index(selected)
+                scores = similarities[idx]
+                top5 = scores.argsort()[::-1][1:6]
                 
-                # Determine color based on similarity score
-                if score > 0.8:
-                    color = "#4CAF50"  # Green for high similarity
-                elif score > 0.6:
-                    color = "#FF9800"  # Orange for medium similarity
-                else:
-                    color = "#2196F3"  # Blue for lower similarity
+                st.markdown("#### 🏆 Top 5 Similar Products:")
                 
-                with cols[i % 2]:  # Alternate between columns
-                    st.markdown(f"""
-                    <div style="background: linear-gradient(90deg, {color}, {color}DD); 
-                                color: white; padding: 15px; margin: 10px 0; 
-                                border-radius: 10px; border-left: 5px solid {color};">
-                        <h4>#{i+1} 🎁 {product_code}</h4>
-                        <p>📝 {name[:50]}{'...' if len(name) > 50 else ''}</p>
-                        <p>⭐ Similarity Score: <strong>{score:.3f}</strong></p>
-                    </div>
-                    """, unsafe_allow_html=True)
+                # Create columns for better layout
+                cols = st.columns(2)
+                
+                for i, product_idx in enumerate(top5):
+                    product_code = products[product_idx]
+                    name = product_names.loc[product_code].values[0] if product_code in product_names.index else "Product Name Not Available"
+                    score = scores[product_idx]
+                    
+                    # Determine color based on similarity score
+                    if score > 0.8:
+                        color = "#4CAF50"  # Green for high similarity
+                    elif score > 0.6:
+                        color = "#FF9800"  # Orange for medium similarity
+                    else:
+                        color = "#2196F3"  # Blue for lower similarity
+                    
+                    with cols[i % 2]:  # Alternate between columns
+                        st.markdown(f"""
+                        <div style="background: linear-gradient(90deg, {color}, {color}DD); 
+                                    color: white; padding: 15px; margin: 10px 0; 
+                                    border-radius: 10px; border-left: 5px solid {color};">
+                            <h4>#{i+1} 🎁 {product_code}</h4>
+                            <p>📝 {name[:50]}{'...' if len(name) > 50 else ''}</p>
+                            <p>⭐ Similarity Score: <strong>{score:.3f}</strong></p>
+                        </div>
+                        """, unsafe_allow_html=True)
+            except Exception as e:
+                st.error(f"Error generating recommendations: {e}")
 
 with tab2:
     st.markdown("### Predict Customer Behavior")
@@ -107,37 +139,40 @@ with tab2:
     
     if st.button("🔮 Predict Customer Type", type="primary"):
         with st.spinner('🧠 AI is analyzing customer behavior...'):
-            data = scaler.transform([[recency, frequency, monetary]])
-            cluster = model.predict(data)[0]
-            
-            segments = {
-                0: ("🔵 Regular Customer", "Steady and reliable shoppers", "#2196F3", "Keep them engaged with regular promotions."),
-                1: ("💎 VIP Customer", "Your most valuable customers!", "#4CAF50", "Offer premium products and exclusive deals."), 
-                2: ("⚠️ At-Risk Customer", "Need immediate attention", "#FF5722", "Send them a special discount to win them back!"),
-                3: ("🌟 New Customer", "Fresh potential to nurture", "#FF9800", "Perfect time for welcome offers and onboarding.")
-            }
-            
-            title, desc, color, action = segments.get(cluster, ("❓ Unknown", "Unidentified segment", "#9E9E9E", "Further analysis needed."))
-            
-            st.markdown(f"""
-            <div style="background: linear-gradient(135deg, {color}, {color}AA); 
-                        color: white; padding: 30px; text-align: center; 
-                        border-radius: 20px; margin: 20px 0; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
-                <h2>{title}</h2>
-                <h4>{desc}</h4>
-                <p><strong>Cluster ID: {cluster}</strong></p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Action recommendations
-            if cluster == 1:
-                st.success(f"✨ {action}")
-            elif cluster == 2:
-                st.error(f"🚨 {action}")
-            elif cluster == 3:
-                st.info(f"👋 {action}")
-            else:
-                st.info(f"📈 {action}")
+            try:
+                data = scaler.transform([[recency, frequency, monetary]])
+                cluster = model.predict(data)[0]
+                
+                segments = {
+                    0: ("🔵 Regular Customer", "Steady and reliable shoppers", "#2196F3", "Keep them engaged with regular promotions."),
+                    1: ("💎 VIP Customer", "Your most valuable customers!", "#4CAF50", "Offer premium products and exclusive deals."), 
+                    2: ("⚠️ At-Risk Customer", "Need immediate attention", "#FF5722", "Send them a special discount to win them back!"),
+                    3: ("🌟 New Customer", "Fresh potential to nurture", "#FF9800", "Perfect time for welcome offers and onboarding.")
+                }
+                
+                title, desc, color, action = segments.get(cluster, ("❓ Unknown", "Unidentified segment", "#9E9E9E", "Further analysis needed."))
+                
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, {color}, {color}AA); 
+                            color: white; padding: 30px; text-align: center; 
+                            border-radius: 20px; margin: 20px 0; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
+                    <h2>{title}</h2>
+                    <h4>{desc}</h4>
+                    <p><strong>Cluster ID: {cluster}</strong></p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Action recommendations
+                if cluster == 1:
+                    st.success(f"✨ {action}")
+                elif cluster == 2:
+                    st.error(f"🚨 {action}")
+                elif cluster == 3:
+                    st.info(f"👋 {action}")
+                else:
+                    st.info(f"📈 {action}")
+            except Exception as e:
+                st.error(f"Error predicting customer type: {e}")
 
 with tab3:
     st.markdown("### 📊 Performance & Data Statistics")
